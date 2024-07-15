@@ -1,0 +1,62 @@
+Training is handled by the train script. Documentation of the various parameters in 
+the script file is fairly complete, but perhanps not very useful at the outset. Here
+is something that I hope is a little more friendly:
+
+#####################################################################
+INVOKING TRAIN
+#####################################################################
+Basic invocation looks something like
+
+train <training folder> <data folder> --arguments...
+
+Where:
+<training folder> is the folder in which you want training output (checkpoint
+files, training summaries, and infered output) to be dumped. This is a path 
+relative to the current working directory
+<data folder> is the folder in which the .pickle files containing the relevant 
+data are stored. This is a path relative to /home/rusack/shared/pickles
+
+Important arguments include:
+--target: the name of the training target. See below for more detail
+--best_arch: use the (some what lazily optimized) best architecture arguments 
+    as found in the ECAL regression
+--nosemi: perform a non-semiparametric regression. This by default uses a 
+    loss function of the form (pred-true)^2/true
+--semi_dscb: perform a semiparametric regression, with a log-likelihood loss
+--idx_name <idx_name>: the name of the test/train split indices. prepareHGCAL creates 
+    a split mamed "all"
+
+So, for example, a semiparametric HGCAL regression might be trained with a command like
+
+train HGCAL_semi HGCAL_TestBeam --idx_name all --best_arch --semi_dscb 
+
+##################################################################
+DEFAULT ARGUMENTS
+##################################################################
+
+Most of the train arguments have reasonable defaults, but it might not be clear what 
+these are. They can be found by inspecting the default_args dictionary in the train
+script, or by running it with no extra arguments and reading the printed parameter list
+
+#################################################################
+TRAINING TARGETS
+#################################################################
+
+There are a number of options for training targets. With the "raw energy" (rawE) defined
+as the sum of all the recHit energies, the target options are:
+
+trueE: predict the true energy
+ratio: predict the ratio trueE/rawE (ie the energy correction factor)
+ratioflip: predict the ratio rawE/trueE. This may be more stable than ratio, as it puts 
+    the less reliable quantity (rawE) in the numerator
+logratioflip: predict the quantity log(rawE/trueE). This is the best in the ECAL regression,
+    as it puts proportional under- and over-measurements on equal footing. Note that due to
+    the symmetry of the log() opperator this will perform identically to a "logratio" target
+
+The train script looks for targets in a file named:
+<data_folder>/<target_name>_target.pickle
+Feel free to define your own
+
+Also, note that I'm not sure that the definitely of "raw energy" used here is appropriate
+for sampling calorimeters such as HGCAL. 
+

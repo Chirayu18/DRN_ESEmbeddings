@@ -1,0 +1,3 @@
+save dRs
+
+mask fakes by localidx!=matched idx

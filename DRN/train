@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+
+
+'''
+This is a wrapper script for DRN training
+(Note: throughout, <x> indicates variable expansion)
+
+Typical invocations:
+
+Regression:
+train <training_folder> <data_folder> --best_arch --best_lr_30M --semi_dscb
+
+Classifier:
+train <training_folder> <data_folder> --best_arch --best_lr_30M --classifier 
+
+
+'''
+
+'''
+Detailed argument descriptions:
+
+Positional arguments:
+    folder: folder to write information about trained model into. 
+        This path is relative to the current working directory
+    data_folder: folder which contains all of the pickled datafiles
+        This path is relative to /home/rusack/shared/pickles
+
+Convenience learning rate arguments:
+    --best_lr_30M: use "best" learning rate parameters for 30M event dataset. alias for:
+        --lr_sched Cyclic --n_epochs 50 --acc_rate 1 --train_batches 3000 --max_lr 1e-3 --min_lr 1e-7
+    --best_lr_5M: use "best" learning rate parameters for 5M event (v3) dataset. alias for:
+        --lr_sched Cyclic --n_epochs 100 --acc_rate 1 --train_batches 500 --max_lr 1e-3 --min_kr 1e-7
+
+Convenience architecture argument:
+    --best_arch: use "best" architecture parameters. Alias for
+        --in_layers 4 --agg_layers 6 --mp_layers 3 --out_layers 2 --pool max
+
+Convenience model type arguments:
+    --nosemi: nonsemiparametric regression. Alias for
+        --loss_func abs_energy_fraction_loss --num_classes 1 --target logratioflip
+    --semi_dscb: double-sided crystal ball semiparametric regression. Alias for
+        --loss_func dscb_loss --num_classes 6 --target logratioflip
+    --semi_dscb_l2: as above, with l2 regularization of correction magnitude. Alias for
+        --loss_func dscb_loss_l2 --num_classes 6 --target logratioflip --reg 1 --thresh 1
+    --classifier: 2-way classifier. Alias for
+        --loss_func classifier_loss --num_classes 1 --target labels 
+
+Data arguments:
+    --idx_name: the name of the training/validation indices to use
+        the program will look for <data_folder>/<idx_name>_valididx.pickle, <...>_trainidx.pickle
+    target: the name of the target to use
+        the program will look for <data_folder>/<target>_target.pickle 
+    ES: whether the feature matrix contains hits from the preshower. Options are:
+        no: no preshower hits
+        yes: preshower hits
+        scaled: preshower hits on their own energy scale. This is the best-performing option
+    coords: coordinate system to use. Options are:
+        cart: cartesian (x, y, z) 
+        proj: projective (eta, phi, z)
+        local: local. (iEta, iPhi, 0) in EB, (iX, iY, +-1) in E. 
+            Local coords are incompatible with ES!= no
+
+Architecture arguments:
+    noloop: don't include self-loops in the DRN's nearest neighbor graphs. This is not recommended
+    pool: type of pooling to use. Options are:
+        max: max pooling. This is the best option
+        mean: mean pooling
+        add: sum pooling
+    in_layers: depth of input network 
+    agg_layers: number of aggregation steps
+    mp_layers: depth of message-passing networks
+    out_layers: depth of output network
+
+SGD arguments:
+    train_batches/train_batch_size: determine the size of training batches.
+        train_batches: specifies number of batches per epoch
+        train_batch_size: specifies number of samples per batch. 
+            Passing --train_batch_size makes the program ignore --train_batches
+    acc_rate: number of batches over which to accumulate gradients.
+        Equivalent to train_batch_size*=acc_rate, but with reduced VRAM footprint (at speed cost)
+        Useful if desired batch size does not fit in VRAM
+    valid_batch_size: number of samples per validation batch. 
+        This should be tuned s.t. validation batches just fit in the VRAM
+    n_epochs: number of epochs over which to run
+
+Loss function arguments:
+    loss_func: name of loss function to use. Can be any of torch builtin loss functions, or one of:
+        abs_energy_fraction_loss: (pred-true)/true loss, adjusted to allow true values <= 0
+        dscb_loss: double-sided crystal ball semiparametric loss
+        dscb_loss_l2: as above, with l2 regulatization of correction magnitude
+        classifier_loss: cross-entropy loss for 2-way classifier (includes sigmoid activation)
+    num_classes: desired dimensionality of network output. 
+        Must agree with dimension expected by loss_func
+    If loss_func == dscb_loss_l2, two additional arguments:
+        thresh: minimum correction magnitude to apply regulatization to 
+            (1=apply to all, 2=apply only to 2x corrections and above, etc)
+        reg: regularization magnitude parameter
+
+Learning rate arguments:
+    lr_sched: name of learning rate schedule. can be one of:
+        Cyclic: Cosine anealing schedule with warm restarts 
+        TorchCyclic: Cyclic learning schedule 
+        Const: constant learning rate 
+    max_lr: maximum (starting) learning rate
+    min_lr: minimum learning rate
+    If lr_sched == Cyclic, additional arguments:
+        restart_period: period of warm restarts. If not specified, restart_period = n_epochs
+    If lr_sched == TorchCyclic, additional arguments:
+        gamma: exponential decay parameter in learning rate cycle 
+
+Running arguments:
+    device: CUDA decide index on which to run the mode. 
+        --device -1 runs on CPU
+    predict_only: only run inference on an already-trained model
+    warm: path to a checkpoint file with weights for warm start of training
+    dry: do a dry run (parse arguments and then exit)
+'''
+
+import argparse 
+from argparse import RawTextHelpFormatter
+import sys
+
+#check_git()
+
+parser = argparse.ArgumentParser(description='Train a Dynamic Reduction Network', formatter_class = RawTextHelpFormatter)
+
+parser.add_argument('folder', type=str, help='Folder in which training ouput should be written')
+parser.add_argument('data_folder', type=str, help='Folder containing pickles with training data. Path is relative to shared/pickles')
+
+parser.add_argument('--idx_name', type=str, default=None,help='Name of train/validation split to use.\n\tLooks in <data_folder>/<idx_name>_valididx.pickle and _trainidx.pickle')
+parser.add_argument('--weights_name', type=str, default=None,help='Name of weigts to use.\n\tLooks in <data_folder>/<weights_name>_weights.pickle')
+
+parser.add_argument('--target', type=str, default=None,help='Name of training target.\n\tTarget should be in <data_folder>/<target>_target.pickle')
+
+parser.add_argument('--ES', type=str, default=None, choices=['no', 'yes', 'scaled'], help="Whether the feature matrix contains ES hits. Options are:\n\tno: no ES\n\tyes: include ES\n\tscaled: include ES on its own energy scale")
+parser.add_argument('--coords', type=str, default=None, choices=['cart', 'proj', 'local'], help="Coordinate system of feature matrix. Options are\n\tcart: Cartesian (x, y, z)\n\tproj: Projective (Eta, Phi, Z)\n\tlocal: Local: (iEta, iPhi, iZ), where iZ=0 in EB, +-1 in EE")
+
+parser.add_argument('--noloop', action='store_true', help="Don't include self-loops in the nearest neighbors graph.")
+parser.add_argument('--pool', type=str, default = None, choices=['max', 'mean', 'add'], help="Type of pooling to use")
+parser.add_argument('--predfile', type=str, default = None, help="Name of predicted file")
+parser.add_argument('--in_layers', type=int, default=None, help="Depth of input network")
+parser.add_argument('--agg_layers', type=int, default=None, help='Number of aggregation layers')
+parser.add_argument('--mp_layers', type=int, default=None, help='Depth of message-passing networks')
+parser.add_argument('--out_layers', type=int, default=None, help='Depth of output network')
+parser.add_argument('--hidden_dim', type=int, default=None, help='Dimensionality of latent space')
+
+parser.add_argument('--device', type=int, default=None, help='CUDA device index on which to run. -1 is CPU')
+
+parser.add_argument('--train_batches', type=int, default=None, help='Number of batches per training epoch. Incompatible with --train_batch_size')
+parser.add_argument('--train_batch_size', type=int, default=None, help='Size of training batches. Incompatible with --train_batches')
+parser.add_argument('--valid_batch_size', type=int, default=None, help="Size of validation batches. Should be adjusted to just fit in VRAM")
+parser.add_argument('--acc_rate', type=int, default=None, help='Number of training batches over which to accumulate gradients')
+
+parser.add_argument('--loss_func', type=str, default=None, help='Name of loss function to use')
+parser.add_argument('--num_classes', type=int, default=None, help='Dimension of network output')
+parser.add_argument('--thresh', type=float, default=None,help='Threshold in dscb l2 loss and dscb sigmoid loss')
+parser.add_argument('--minalpha', type=float, default=None,help='Minimum alpha value in dscb sigmoid minalpha loss')
+parser.add_argument('--reg', type=float, default=None,help='Regularization amount in dscb l2 loss')
+parser.add_argument('--epsilon', type=float, default=None,help='Threshold in dscb sigmoid loss')
+
+parser.add_argument('--n_epochs', type=int, default=None, help='Number of training epochs')
+parser.add_argument('--lr_sched',type=str,default=None, choices=['Cyclic', 'TorchCyclic', 'Const'], help='Learning rate schedule')
+parser.add_argument('--max_lr', type=float, default=None, help='Max learning rate')
+parser.add_argument('--min_lr', type=float, default=None, help='Min learning rate')
+parser.add_argument('--restart_period', type=int, default=None, help='Research period of Cyclic and TorchCyclic schedules')
+parser.add_argument('--gamma',type=float,default=None,help='Exponential parameter to TorchCyclic')
+
+parser.add_argument('--predict_only', action='store_true', help="Only run inference")
+parser.add_argument('--latent_probe', type=int, default=None, help="Dump latent features after the i'th aggregation step instead of actual network output")
+
+parser.add_argument('--warm',type=str, default=None, help='Checkpoint file with weights for warm start')
+
+parser.add_argument('--dry', action='store_true', help='Dry run')
+
+parser.add_argument('--best_arch', action='store_true', help='Apply "best" architecture parameters')
+parser.add_argument('--best_lr_30M', action='store_true', help='Apply "best" learning rate parameters for 30M sample')
+parser.add_argument('--best_lr_6M', action='store_true', help='Apply "best" learning rate parameters for 6M sample')
+
+parser.add_argument('--nosemi', action='store_true', help='Non-semiparametic regression.\n\tAlias for --loss_func abs_energy_fraction_loss --num_classes 1 --target logratioflip')
+parser.add_argument('--semi_dscb', action='store_true', help='Semiparametric dscb regression\n\tAlias for --loss_func dscb_loss --num_classes 6 --target logratioflip')
+parser.add_argument('--semi_dscb_l2', action='store_true', help='Semiparametric dscb regression with l2 regularization on correction magnitude\n\tAlias for --loss_func dscb_loss_l2 --num_classes 6 --reg 1 --thresh 1 --target logratioflip')
+parser.add_argument('--semi_dscb_sigmoid', action='store_true', help='Semiparametric dscb regression with sigmoid activation for correction magnitude\n\tAlias for --loss_func dscb_loss_sigmoid --num_classes 6 --thresh 1 --epsilon 1e-3 --target logratioflip')
+parser.add_argument('--semi_dscb_sigmoid_minalpha', action='store_true', help='Semiparametric dscb regression with sigmoid activation for correction magnitude\n\tAlias for --loss_func dscb_loss_sigmoid --num_classes 6 --thresh 1 --epsilon 1e-3 --minalpha 1 --target logratioflip')
+parser.add_argument('--classifier', action='store_true', help='ID classifier\n\tAlias for --loss_func classifier_loss --num_classes 1 --target labels')
+
+parser.add_argument('--semiparam', action='store_true')
+parser.add_argument('--graph_features', type=str, nargs = "+", default = [])
+
+default_args = {
+    'folder' : None,
+    'data_folder': None,
+
+    'idx_name' : 'EB',
+
+    'target' : 'logratioflip',
+
+    'ES' : 'no',
+    'coords' : 'cart',
+
+    'loop' : True,
+    'pool' : 'max',
+	'predfile' : 'pred.pickle',
+    'in_layers' : 4,
+    'agg_layers' : 6,
+    'mp_layers' : 3,
+    'out_layers' : 2,
+    'hidden_dim' : 64,
+    
+    'device' : 0,
+
+    'train_batches' : 500,
+    'train_batch_size' : -1,
+    'valid_batch_size' : 10000,
+    'acc_rate' : 1,
+
+    'loss_func' : 'dscb_loss',
+    'num_classes' : 6,
+
+    'n_epochs' : 100,
+    'lr_sched' : 'Cyclic',
+    'max_lr' : 1e-3,
+    'min_lr' : 1e-7,
+    'restart_period': None,
+
+    'gamma' : None,
+    'thresh' : None,
+    'reg' : None,
+    'epsilon' : None,
+    'minalpha' : None,
+
+    'warm' : None,
+
+    'semiparam' : False,
+    'graph_features' : []
+}
+
+best_arch = {
+    'in_layers' : 4,
+    'agg_layers' : 6,
+    'hidden_dim' : 64,
+    'mp_layers' : 3,
+    'out_layers' : 2,
+    'pool' : 'max'
+}
+
+best_lr_30M = {
+    'lr_sched' : 'Cyclic',
+    'n_epochs' : 50,
+    'acc_rate' : 1,
+    'train_batches' : 3000,
+    'max_lr' : 1e-3,
+    'min_lr' : 1e-7
+}
+
+best_lr_5M = {
+    'lr_sched' : 'Cyclic',
+    'n_epochs' : 100,
+    'acc_rate' : 1,
+    'min_lr' : 1e-7,
+    'max_lr' : 1e-3,
+    'train_batches' : 500
+}
+
+semi_dscb = {
+    'loss_func' : 'dscb_loss',
+    'num_classes' : 6,
+    'target' : 'logratioflip',
+    'semiparam' : True,
+}
+
+semi_dscb_l2 = {
+    'loss_func' : 'dscb_loss_l2',
+    'num_classes' : 6,
+    'reg' : 1,
+    'thresh' : 1,
+    'target' : 'logratioflip',
+    'semiparam': True,
+}
+
+semi_dscb_sigmoid = {
+    'loss_func' : 'dscb_loss_sigmoid',
+    'num_classes' : 6,
+    'epsilon' : 1e-6,
+    'thresh' : 2,
+    'target' : 'logratioflip',
+    'semiparam' : True,
+}
+
+semi_dscb_sigmoid_minalpha = {
+    'loss_func' : 'dscb_loss_sigmoid_minalpha',
+    'num_classes' : 6,
+    'epsilon' : 1e-6,
+    'thresh' : 2,
+    'minalpha' : 1,
+    'target' : 'logratioflip',
+    'semiparam' : True,
+}
+
+classifier = {
+    'loss_func' : 'classifier_loss',
+    'num_classes' : 1,
+    'target' : 'labels',
+    'semiparam' : False,
+}
+
+nosemi = {
+    'loss_func' : 'abs_energy_fraction_loss',
+    'num_classes' : 1,
+    'target' : 'logratioflip',
+    'semiparam' : False,
+}
+
+
+pased_args = parser.parse_args()
+
+#start with default arguments
+args = default_args
+
+#apply aggregated arguments
+if pased_args.best_arch:
+    for arg in best_arch:
+        args[arg] = best_arch[arg]
+
+n_bestlrs = 0
+if pased_args.best_lr_30M:
+    n_bestlrs+=1
+if pased_args.best_lr_6M:
+    n_bestlrs+=1
+if n_bestlrs>1:
+    print("Choose at most one of best_lr_* argument")
+    sys.exit(1)
+elif pased_args.best_lr_30M:
+    for arg in best_lr_30M:
+        args[arg] = best_lr_30M[arg]
+elif pased_args.best_lr_6M:
+    for arg in best_lr_6M:
+        args[arg] = best_lr_6M[arg]
+
+n_types = 0
+if pased_args.semi_dscb:
+    n_types += 1
+if pased_args.semi_dscb_l2:
+    n_types += 1
+if pased_args.semi_dscb_sigmoid:
+    n_types += 1
+if pased_args.semi_dscb_sigmoid_minalpha:
+    n_types += 1
+if pased_args.classifier:
+    n_types += 1
+if pased_args.nosemi:
+    n_types += 1
+if n_types > 1:
+    print("Choose at most one of the type arguments")
+    sys.exit(1)
+elif pased_args.semi_dscb:
+    for arg in semi_dscb:
+        args[arg] = semi_dscb[arg]
+elif pased_args.semi_dscb_l2:
+    for arg in semi_dscb_l2:
+        args[arg] = semi_dscb_l2[arg]
+elif pased_args.semi_dscb_sigmoid:
+    for arg in semi_dscb_sigmoid:
+        args[arg] = semi_dscb_sigmoid[arg]
+elif pased_args.semi_dscb_sigmoid_minalpha:
+    for arg in semi_dscb_sigmoid_minalpha:
+        args[arg] = semi_dscb_sigmoid_minalpha[arg]
+elif pased_args.nosemi:
+    for arg in nosemi:
+        args[arg] = nosemi[arg]
+elif pased_args.classifier:
+    for arg in classifier:
+        args[arg] = classifier[arg]
+
+#apply directly passed arguments
+if pased_args.noloop:
+    args['loop'] = False
+
+if pased_args.semiparam:
+    args['semiparam'] = True
+
+pased_args = vars(pased_args)
+for arg in pased_args:
+    if pased_args[arg] is not None and type(pased_args[arg])!=bool:
+        args[arg] = pased_args[arg]
+
+#sensible default based on other arguments
+if args['restart_period'] is None:
+    args['restart_period'] = args['n_epochs']
+
+if args['loss_func'] == 'dscb_loss_l2' and \
+        (args['thresh'] is None or args['reg'] is None):
+    print("Error: need to specify norm and thresh for dscb_los_l2 loss function")
+    sys.exit(1)
+
+print("")
+print("################ TRAINING ARGUMENTS ###################")
+for key in args:
+    print("%s:"%key,args[key])
+print("#######################################################")
+
+if pased_args['dry']:
+    sys.exit(0)
+
+from Train import Train
+import torch.autograd
+
+trainer = Train(**args)
+
+
+if not pased_args['predict_only']:
+    trainer.loadValidIdx()
+trainer.loadFeatures(pased_args['predict_only'])
+if not pased_args['predict_only']:
+    trainer.split()
+    trainer.train()
+
+trainer.predict()

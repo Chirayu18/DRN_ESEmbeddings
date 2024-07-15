@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+
+"""
+PROGRAM TO SETUP HGCAL TESTBEAM DATA FOR USE IN DRN FRAMEWORK
+Simon Rothman; July 14, 2021
+
+The framework I've writted for the DRN expects data to have been extracted from the relevant nTuple,
+cleaned up as necessary, and stored as pickle objects. 
+This is much faster than skimming the .root file every time you run anything.
+
+This is a simple script which reads the nTuple and generates the necessary .pickle files. 
+It need only be run once for a given .root file. If multiple .root files are needed, you 
+can either merge them before running this script, or run this script multiple times,
+extracting each into a different location. The resulting .pickle files will then contain
+awkward arrays (or python lists in the case of cartfeat.pickle) which can be concatenated. 
+It would not be difficult to write parsing code to go over multiple root files, but I have 
+not done so
+
+The nTuple processing is wrapped in Extract.py; 
+only the constructor and the readHGCAL() method are relevant 
+"""
+
+
+import Extract_matrix
+import pickle
+import numpy as np
+import sys
+import os
+
+###################################################
+# Parameters                                      #
+###################################################
+args = list(map(float, sys.argv[1::]))
+print(args)
+
+#for i in [100,200,400,600,1000,1200]:
+for i in np.arange(args[0], args[1] + args[2] / 2, args[2]):
+    # path to nTuple
+    # nTuple = "Skimmed_AODs_analysed/Skimmed_AODs_mass" + str(int(i)) + "/Plots.root"
+    # nTuple = "Skimmed_bigsample_M" + str(int(i))+ "/Plots.root"
+    nTuple = "Skimmed_fixedSample_analysed/Plots.root"
+    # name of nTuple tree
+    tree = "fordrn"
+    # path to folder in which to store extracted python-ready data objects. Should be somewhere in shared/pickles
+    folder = "AToGG_pickles_fixedSample_tworeco"
+    os.makedirs(folder, exist_ok=True)
+    # proportion of dataset to use as training set
+    split = 0.8
+
+    ####################################################
+    # Main logic                                       #
+    ####################################################
+
+    # nTuple-handling is wrapped in Extract.py
+    ex = Extract_matrix.Extract(folder, nTuple, tree)
+    # ex.readHGCAL()
+    ex.read("Zee_data")
+
+    # a bit silly, but load in trueE to figure out data length
+    with open("%s/trueE_target.pickle" % folder, "rb") as f:
+        trueE = pickle.load(f)
+    # trueE = trueE[trueE<150]
+    length = len(trueE)
+
+    # create train/test split
+    train_idx = np.random.choice(length, int(split * length + 0.5), replace=False)
+
+    mask = np.ones(length, dtype=bool)
+    mask[train_idx] = False
+    valid_idx = mask.nonzero()[0]
+
+    with open("%s/all_valididx.pickle" % folder, "wb") as f:
+        pickle.dump(valid_idx, f)
+
+    with open("%s/all_trainidx.pickle" % folder, "wb") as f:
+        pickle.dump(train_idx, f)

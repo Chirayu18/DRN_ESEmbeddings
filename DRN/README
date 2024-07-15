@@ -1,0 +1,32 @@
+###########################################
+on MSI, add the following to your .bashrc:
+###########################################
+
+# Load modules
+module load cmake
+module load gcc
+module load python3
+module load cuda/10.1
+module load graphviz
+
+# Ensure that everyone has access to files you create
+umask 007
+
+# Ensure that python output dumps in real time (eg so that you can view intermediate status of running trainings) 
+export PYTHONUNBUFFERED=1
+
+# Activate conda environment
+source activate torch1.7
+
+
+
+########################################################
+to build a viable conda environment, run the following:
+########################################################
+
+conda create --name torch1.7 python=3.7
+source activate torch1.7
+
+pip install torch==1.7.1+cu101 torchvision==0.8.2+cu101 torchaudio==0.7.2 -f https://download.pytorch.org/whl/torch_stable.html
+pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://pytorch-geometric.com/whl/torch-1.7.0+cu101.html
+pip install torch-geometric numpy scipy matplotlib uproot awkward coffea seaborn

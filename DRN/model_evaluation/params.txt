@@ -1,0 +1,18 @@
+Training with max pooling
+\textbf{HyperParameters}
+\textit{in_layers:} 3
+\textit{agg_layers:} 2
+\textit{mp_layers:} 2
+\textit{out_layers:} 2
+\textit{hidden_dim:} 128
+\textit{pool:} max
+\textit{k in knn step:} 100 ( all rechits ) 
+
+\textbf{Loss function}
+$ ( predicted - true )^2 $
+
+\textbf{Inputs}
+RecHitX, RecHitY, RecHitZ, RecHitE
+
+\textbf{Target}
+$m_{gen}$
